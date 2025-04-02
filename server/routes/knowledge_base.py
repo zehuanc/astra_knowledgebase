@@ -25,7 +25,6 @@ async def create_document_in_kb(
     dataset_id: str,
     import_type: str = Query(..., alias="type", description="Import type: web, file, or qa"),
     title: str = Form(...),
-    metadata: Optional[str] = Form("{}"),
     url: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
     questions: Optional[str] = Form(None),
@@ -40,64 +39,27 @@ async def create_document_in_kb(
     - qa: Import from question-answer pairs
     """
     try:
-        # 根据导入类型处理不同的导入方式
+        # according to import type, handle different import methods
+        dify_doc = DifyDocument(dataset_id=dataset_id)
         if import_type == "web":
             if not url:
                 raise HTTPException(status_code=400, detail="URL is required for web imports")
             
-            # 复用现有的 create_document_from_web 方法
-            return await create_document_from_web(
+            return await dify_doc.create_from_web(
                 dataset_id=dataset_id,
                 url=url,
                 title=title,
-                metadata=metadata
             )
-            
+        
         elif import_type == "file":
             if not file:
                 raise HTTPException(status_code=400, detail="File is required for file imports")
             
-            # 复用现有的 create_document_from_file 方法
-            return await create_document_from_file(
-                dataset_id=dataset_id,
-                file=file,
-                title=title,
-                metadata=metadata
-            )
-                
+
+
         elif import_type == "qa":
             if not questions or not answers:
                 raise HTTPException(status_code=400, detail="Questions and answers are required for Q&A imports")
-            
-            # 解析问题和答案
-            try:
-                questions_list = json.loads(questions)
-                answers_list = json.loads(answers)
-                
-                if not isinstance(questions_list, list) or not isinstance(answers_list, list):
-                    raise HTTPException(status_code=400, detail="Questions and answers must be JSON arrays")
-                
-                if len(questions_list) != len(answers_list):
-                    raise HTTPException(status_code=400, detail="Questions and answers must have the same length")
-                
-            except json.JSONDecodeError:
-                raise HTTPException(status_code=400, detail="Invalid JSON format for questions or answers")
-            
-            # 创建 QA 文档对象
-            qa_document = QADocumentCreate(
-                title=title,
-                questions=questions_list,
-                answers=answers_list,
-                source_type="qa",
-                metadata=json.loads(metadata) if metadata else {}
-            )
-            
-            # 复用现有的 create_document_from_qa 方法
-            return await create_document_from_qa(
-                dataset_id=dataset_id,
-                document=qa_document
-            )
-            
         else:
             raise HTTPException(status_code=400, detail=f"Invalid import type: {import_type}. Supported types: web, file, qa")
         

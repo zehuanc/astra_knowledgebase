@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     SECRET_KEY: str = os.environ.get("SECRET_KEY", "secret_key_for_development")
     DIFY_API_KEY: str = os.environ.get("DIFY_API_KEY", "")
     DIFY_DATASET_APIKEY: str = os.environ.get("DIFY_DATASET_APIKEY", "")
+    JINA_TOKEN: str = os.environ.get("JINA_TOKEN", "")
     
     # Database settings can be added here
     # DATABASE_URL: str = os.environ.get("DATABASE_URL", "sqlite:///./astra.db")

@@ -97,7 +97,7 @@ class DocumentImportConfig(BaseModel):
         description="Document processing rules"
     )
     
-    # 以下字段设为可选
+    # optional fields
     doc_form: Optional[DocumentForm] = Field(
         None, 
         description="Document form: text_model, hierarchical_model, or qa_model"
@@ -123,7 +123,7 @@ class DocumentImportConfig(BaseModel):
                 "process_rule": {
                     "mode": "automatic"
                 },
-                # 可选字段示例
+                # Optional fields example
                 "doc_form": "text_model",
                 "doc_language": "English",
                 "retrieval_model": {

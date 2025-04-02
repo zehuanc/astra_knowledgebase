@@ -8,29 +8,54 @@ from pydantic import BaseModel, HttpUrl
 from server.config import get_settings
 from server.schemas.document import DocumentImportConfig
 
-class DifyDocumentResponse(BaseModel):
+class DataSourceInfo(BaseModel):
+    """
+    数据源信息模型
+    
+    根据不同的数据源类型，可能包含不同的字段：
+    - upload_file: 上传文件时包含 upload_file_id
+    - notion: Notion导入时包含相关Notion信息
+    - web: 网页导入时包含URL信息
+    """
+    upload_file_id: Optional[str] = None
+    url: Optional[str] = None
+    notion_page_id: Optional[str] = None
+    notion_workspace_id: Optional[str] = None
+    
+class DocumentResponse(BaseModel):
     """Dify API 文档响应模型"""
-    id: str
-    dataset_id: str
-    document_id: Optional[str] = None
-    position: Optional[int] = None
-    content: Optional[str] = None
-    metadata: Optional[Dict[str, Any]] = {}
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
-    status: Optional[str] = None
-    error: Optional[str] = None
-    tokens: Optional[int] = None
-    segments: Optional[List[Dict[str, Any]]] = None
-    indexing_status: Optional[str] = None
-    word_count: Optional[int] = None
-    character_count: Optional[int] = None
-    hit_count: Optional[int] = None
-    enabled: Optional[bool] = None
-    disabled_at: Optional[datetime] = None
-    disabled_by: Optional[str] = None
-    archived: Optional[bool] = None
-    display_status: Optional[str] = None
+    id: str = ""
+    position: Optional[int] = 1
+    data_source_type: Optional[str] = None  # 数据源类型: upload_file, notion, web, api等
+    data_source_info: Optional[DataSourceInfo] = None
+    dataset_process_rule_id: Optional[str] = ""
+    name: Optional[str] = None  # 文档名称/标题
+    created_from: Optional[str] = "api"  # 创建来源
+    created_by: Optional[str] = ""  # 创建者ID
+    created_at: Optional[int] = None  # 创建时间戳
+    tokens: int = 0  # 令牌数量
+    indexing_status: Optional[str] = "waiting"  # 索引状态: waiting, indexing, completed, error
+    error: Optional[str] = None  # 错误信息
+    enabled: bool = True  # 是否启用
+    disabled_at: Optional[int] = None  # 禁用时间戳
+    disabled_by: Optional[str] = None  # 禁用者ID
+    archived: bool = False  # 是否归档
+    display_status: Optional[str] = "queuing"  # 显示状态
+    word_count: int = 0  # 单词数
+    hit_count: int = 0  # 命中数
+    doc_form: Optional[str] = "text_model"  # 文档形式: text_model, qa_model, hierarchical_model
+    content: Optional[str] = None  # 文档内容(可能不在返回中)
+
+class DifyDocumentResponse(BaseModel):
+    """Dify API 完整响应模型"""
+    document: DocumentResponse
+    batch: Optional[str] = ""
+    
+    def __getattr__(self, name):
+        """允许直接访问document属性"""
+        if name in self.document.__fields__:
+            return getattr(self.document, name)
+        return super().__getattr__(name)
 
 class DifyDocument:
     """Dify 文档操作类"""
@@ -61,10 +86,22 @@ class DifyDocument:
     
 
     def jina_crawler(self, url: str) -> str:
+        settings = get_settings()
+        jina_token = settings.JINA_TOKEN
+        
+        if not jina_token:
+            raise ValueError("JINA_TOKEN not configured in environment variables")
+        
         jina_url = "https://r.jina.ai"
         request_url = f"{jina_url}/{url}"
-        jina_headers = {'Authorization': 'Bearer jina_e76d74a8487f437ebf3a776bc3975305gTJxOo7gkGCGk3qawLlYbNqtzOMY'}
+        jina_headers = {'Authorization': f'Bearer {jina_token}'}
+        
         jina_response = requests.get(request_url, headers=jina_headers)
+        
+        # check response status
+        if jina_response.status_code != 200:
+            raise ValueError(f"Failed to crawl URL: {url}. Status code: {jina_response.status_code}")
+        
         return jina_response.text
 
 
@@ -173,127 +210,77 @@ class DifyDocument:
     async def create_from_web(self, 
                              url: str, 
                              title: str = None,
-                             metadata: Union[Dict[str, Any], str] = None,
                              dataset_id: str = None) -> DifyDocumentResponse:
         """
         从网页创建文档
         
         Args:
-            url: 网页 URL
-            title: 文档标题
-            metadata: 文档元数据，可以是字典或 JSON 字符串
-            dataset_id: 知识库 ID，如果不提供则使用初始化时的 ID
+            url
+            title
+            dataset_id
             
         Returns:
-            DifyDocumentResponse: 文档响应对象
+            DifyDocumentResponse
         """
         dataset_id = dataset_id or self.dataset_id
         if not dataset_id:
             raise ValueError("Dataset ID is required")
         
         crawler_response_text = self.jina_crawler(url)
-        data = {
-            "name": url,
-            "text": crawler_response_text,
-            "indexing_technique": "high_quality",
-            "process_rule": {"mode": "automatic"}
-        }
-        
-        if title:
-            data["name"] = title
-        
-        # 发送请求
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.api_base_url}/datasets/{dataset_id}/document/create-by-text",
-                headers=self._get_headers(),
-                json=data,
-                timeout=60.0
-            )
+        response = self.create_from_text(
+            crawler_response_text, 
+            title, 
+            dataset_id, 
+            doc_form="text_model", 
+            import_mode="default"
+        )
             
-            if response.status_code != 200:
-                error_detail = response.text
-                try:
-                    error_json = response.json()
-                    if "message" in error_json:
-                        error_detail = error_json["message"]
-                except:
-                    pass
-                raise httpx.HTTPStatusError(
-                    f"Error creating document: {error_detail}",
-                    request=response.request,
-                    response=response
-                )
-            
-            return DifyDocumentResponse(**response.json())
+        return response
     
     async def create_from_text(self, 
                               text: str, 
                               title: str,
-                              metadata: Union[Dict[str, Any], str] = None,
                               dataset_id: str = None,
                               doc_form: Optional[str] = None,
-                              doc_language: Optional[str] = None,
-                              embedding_model: Optional[str] = None,
-                              embedding_model_provider: Optional[str] = None) -> DifyDocumentResponse:
+                              import_mode: Optional[str] = None) -> DifyDocumentResponse:
         """
-        从文本创建文档
-        
         Args:
-            text: 文本内容
-            title: 文档标题
-            metadata: 文档元数据，可以是字典或 JSON 字符串
-            dataset_id: 知识库 ID，如果不提供则使用初始化时的 ID
-            doc_form: 文档形式，可选
-            doc_language: 文档语言，可选
-            embedding_model: 嵌入模型，可选
-            embedding_model_provider: 嵌入模型提供商，可选
+            text: content of the document
+            title: title of the document
+            dataset_id: unique identifier of the dataset
+            doc_form: form of the document, text_model | hierarchical_model | qa_model
             
         Returns:
-            DifyDocumentResponse: 文档响应对象
+            DifyDocumentResponse
         """
         dataset_id = dataset_id or self.dataset_id
         if not dataset_id:
             raise ValueError("Dataset ID is required")
-        
-        # 处理元数据
-        if isinstance(metadata, dict):
-            metadata_str = json.dumps(metadata)
-        elif isinstance(metadata, str):
-            # 验证是否为有效的 JSON 字符串
-            try:
-                json.loads(metadata)
-                metadata_str = metadata
-            except json.JSONDecodeError:
-                metadata_str = "{}"
+
+        import_mode = import_mode or "default"
+        if import_mode == "default":
+            # default config
+            config_data = {
+                "name": title,
+                "text": text,
+                "indexing_technique": "high_quality",
+                "process_rule": {"mode": "automatic"}
+            }
         else:
-            metadata_str = "{}"
+            raise ValueError("Invalid import mode")
         
-        # 创建基本配置（只包含必填字段）
-        config_data = {
-            "name": title,
-            "text": text,
-            "indexing_technique": "high_quality",
-            "process_rule": {"mode": "automatic"}
-        }
-        
-        # 添加可选字段（如果提供）
+        # doc_form:
+        # text_model Text documents are directly embedded; economy mode defaults to using this form
+        # hierarchical_model Parent-child mode
+        # qa_model Q&A Mode: Generates Q&A pairs for segmented documents and then embeds the questions
+        doc_form = doc_form or "text_model"
         if doc_form:
             config_data["doc_form"] = doc_form
         
-        if doc_language:
-            config_data["doc_language"] = doc_language
         
-        if embedding_model:
-            config_data["embedding_model"] = embedding_model
-        
-        if embedding_model_provider:
-            config_data["embedding_model_provider"] = embedding_model_provider
-        
-        # 创建文档导入配置
         config = DocumentImportConfig(**config_data)
         
-        # 发送请求
+
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{self.api_base_url}/datasets/{dataset_id}/document/create-by-text",
@@ -322,20 +309,17 @@ class DifyDocument:
                           document_id: str,
                           dataset_id: str = None) -> DifyDocumentResponse:
         """
-        获取文档详情
-        
         Args:
-            document_id: 文档 ID
-            dataset_id: 知识库 ID，如果不提供则使用初始化时的 ID
+            document_id
+            dataset_id
             
         Returns:
-            DifyDocumentResponse: 文档响应对象
+            DifyDocumentResponse
         """
         dataset_id = dataset_id or self.dataset_id
         if not dataset_id:
             raise ValueError("Dataset ID is required")
         
-        # 发送请求
         async with httpx.AsyncClient() as client:
             response = await client.get(
                 f"{self.api_base_url}/datasets/{dataset_id}/documents/{document_id}",
@@ -365,22 +349,19 @@ class DifyDocument:
                             limit: int = 20,
                             keyword: str = None) -> Dict[str, Any]:
         """
-        获取文档列表
-        
         Args:
-            dataset_id: 知识库 ID，如果不提供则使用初始化时的 ID
-            page: 页码，从 1 开始
-            limit: 每页数量，默认 20
-            keyword: 搜索关键词
+            dataset_id
+            page
+            limit
+            keyword
             
         Returns:
-            Dict: 包含文档列表和分页信息的字典
+            Dict
         """
         dataset_id = dataset_id or self.dataset_id
         if not dataset_id:
             raise ValueError("Dataset ID is required")
         
-        # 准备查询参数
         params = {
             "page": page,
             "limit": limit
@@ -418,20 +399,18 @@ class DifyDocument:
                              document_id: str,
                              dataset_id: str = None) -> bool:
         """
-        删除文档
-        
         Args:
-            document_id: 文档 ID
-            dataset_id: 知识库 ID，如果不提供则使用初始化时的 ID
+            document_id
+            dataset_id
             
         Returns:
-            bool: 是否删除成功
+            bool
         """
         dataset_id = dataset_id or self.dataset_id
         if not dataset_id:
             raise ValueError("Dataset ID is required")
         
-        # 发送请求
+        
         async with httpx.AsyncClient() as client:
             response = await client.delete(
                 f"{self.api_base_url}/datasets/{dataset_id}/documents/{document_id}",
@@ -516,3 +495,64 @@ class DifyDocument:
                 )
             
             return DifyDocumentResponse(**response.json())
+
+async def test_create_from_text():
+    """
+    测试 create_from_text 方法
+    
+    此函数演示如何使用 create_from_text 方法创建文档，
+    并展示不同参数的使用方式。
+    """
+    from server.config import get_settings
+    
+    settings = get_settings()
+    #web_url = input("请输入网页URL: ")
+    # 确保有有效的 dataset_id 和 API 密钥
+    #dataset_id = "8ac47ff4-01f5-40c9-895f-59035683f0a0"
+    dataset_id = "bf9da2ca-0cc0-4c38-b7aa-60b8de0b8440"
+    
+    # 创建 DifyDocument 实例
+    dify_doc = DifyDocument(dataset_id=dataset_id)
+    #web_text= dify_doc.jina_crawler(web_url)
+    qa_pairs = [
+        {"question": "What is the capital of France?", "answer": "The capital of France is Paris."},
+        {"question": "What is the hometown of Zehuan?", "answer": "Changsha, Hunan, China."},
+        {"question": "What is the name of Zehuan's first pet?", "answer": "Garth"},
+    ]
+
+    try:
+        print("测试场景 1: 基本用法 - 只提供必需参数")
+        response = await dify_doc.create_from_text(
+            text=json.dumps(qa_pairs),
+            title="QA Test",
+            doc_form="qa_model"
+        )
+        
+        # 打印完整响应对象
+        print("响应对象类型:", type(response))
+        print("响应对象:", response)
+        
+        # 测试直接访问 document 属性
+        print("\n通过 __getattr__ 访问 document 属性:")
+        print("文档ID:", response.id)
+        print("文档名称:", response.name)
+        print("索引状态:", response.indexing_status)
+        print("显示状态:", response.display_status)
+        
+        # 直接访问 document 对象
+        print("\n直接访问 document 对象:")
+        print("文档ID:", response.document.id)
+        print("文档名称:", response.document.name)
+        print("索引状态:", response.document.indexing_status)
+        print("批次ID:", response.batch)
+        
+        print("---")
+    except Exception as e:
+        print(f" {str(e)}")
+    
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(test_create_from_text())
+
+
